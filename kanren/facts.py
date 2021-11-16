@@ -1,7 +1,7 @@
-from unification import unify, reify
+from toolz import merge
+from unification import reify, unify
 
 from .util import intersection
-from toolz import merge
 
 
 class Relation(object):
@@ -15,10 +15,27 @@ class Relation(object):
             Relation._id += 1
         self.name = name
 
-    def add_fact(self, *inputs):
-        """ Add a fact to the knowledgebase.
+    def del_fact(self, *inputs):
+        """Del a fact from knowledge-base
 
-        See Also:
+         See Also
+        --------
+            fact
+            facts
+        """
+        fact = tuple(inputs)
+
+        self.facts.remove(fact)
+
+        for key in enumerate(inputs):
+            if key in self.index:
+                self.index.pop(key)
+
+    def add_fact(self, *inputs):
+        """Add a fact to the knowledge-base.
+
+        See Also
+        --------
             fact
             facts
         """
@@ -32,11 +49,7 @@ class Relation(object):
             self.index[key].add(fact)
 
     def __call__(self, *args):
-        """ Returns an evaluated (callable) goal, which returns a list of
-        substitutions which match args against a fact in the knowledge base.
-
-        *args: the goal to evaluate. This consists of vars and values to
-               match facts against.
+        """Return a goal that produces a list of substitutions matching a fact in the knowledge-base.
 
         >>> from kanren.facts import Relation
         >>> from unification import var
@@ -51,12 +64,18 @@ class Relation(object):
         True
         >>> list(r(x, 42, y)({}))
         []
-        """
+
+        Parameters
+        ----------
+        *args:
+            The goal to evaluate. This consists of vars and values to match
+            facts against.
+
+        """  # noqa: E501
 
         def goal(substitution):
             args2 = reify(args, substitution)
-            subsets = [self.index[key] for key in enumerate(args)
-                       if key in self.index]
+            subsets = [self.index[key] for key in enumerate(args) if key in self.index]
             if subsets:  # we are able to reduce the pool early
                 facts = intersection(*sorted(subsets, key=len))
             else:
@@ -74,9 +93,14 @@ class Relation(object):
 
     __repr__ = __str__
 
+def remove_fact(rel, *args):
+    """Remove a fact
+    
+    """
+    rel.del_fact(*args)
 
 def fact(rel, *args):
-    """ Declare a fact
+    """Declare a fact.
 
     >>> from kanren import fact, Relation, var, run
     >>> parent = Relation()
@@ -91,7 +115,7 @@ def fact(rel, *args):
 
 
 def facts(rel, *lists):
-    """ Declare several facts
+    """Declare several facts.
 
     >>> from kanren import fact, Relation, var, run
     >>> parent = Relation()
@@ -102,5 +126,5 @@ def facts(rel, *lists):
     >>> run(1, x, parent(x, "Bart"))
     ('Homer',)
     """
-    for l in lists:
-        fact(rel, *l)
+    for lst in lists:
+        fact(rel, *lst)
