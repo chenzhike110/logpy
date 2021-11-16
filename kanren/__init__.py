@@ -9,7 +9,7 @@ from unification import (unify, reify, unifiable, var, isvar, vars, variables,
 
 from .core import run, eq, conde, lall, lany
 from .goals import seteq, permuteq, goalify, membero
-from .facts import Relation, fact, facts
+from .facts import Relation, fact, facts, remove_fact
 from .term import arguments, operator, term, unifiable_with_term
 
 __version__ = '0.2.3'
