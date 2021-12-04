@@ -1,301 +1,225 @@
-import itertools as it
-from functools import partial
-from .util import (dicthash, interleave, take, multihash, unique, evalt)
-from toolz import groupby, map
+from collections.abc import Generator, Sequence
+from functools import partial, reduce
+from itertools import tee
+from operator import length_hint
 
-from unification import reify, unify, var  # noqa
-
-#########
-# Goals #
-#########
+from cons.core import ConsPair
+from toolz import interleave, take
+from unification import isvar, reify, unify
+from unification.core import isground
 
 
 def fail(s):
     return iter(())
 
 
-def success(s):
-    return iter((s, ))
+def succeed(s):
+    return iter((s,))
 
 
 def eq(u, v):
-    """ Goal such that u == v
+    """Construct a goal stating that its arguments must unify.
 
-    See also:
+    See Also
+    --------
         unify
     """
 
-    def goal_eq(s):
-        result = unify(u, v, s)
-        if result is not False:
-            yield result
-
-    return goal_eq
-
-
-################################
-# Logical combination of goals #
-################################
-
-
-def lall(*goals):
-    """ Logical all with goal reordering to avoid EarlyGoalErrors
-
-    See also:
-        EarlyGoalError
-        earlyorder
-
-    >>> from kanren import lall, membero
-    >>> x = var('x')
-    >>> run(0, x, lall(membero(x, (1,2,3)), membero(x, (2,3,4))))
-    (2, 3)
-    """
-    return (lallgreedy, ) + tuple(earlyorder(*goals))
-
-
-def lallgreedy(*goals):
-    """ Logical all that greedily evaluates each goals in the order provided.
-
-    Note that this may raise EarlyGoalError when the ordering of the
-    goals is incorrect. It is faster than lall, but should be used
-    with care.
-
-    >>> from kanren import eq, run, membero
-    >>> x, y = var('x'), var('y')
-    >>> run(0, x, lallgreedy((eq, y, set([1]))), (membero, x, y))
-    (1,)
-    >>> run(0, x, lallgreedy((membero, x, y), (eq, y, {1})))  # doctest: +SKIP
-    Traceback (most recent call last):
-      ...
-    kanren.core.EarlyGoalError
-    """
-    if not goals:
-        return success
-    if len(goals) == 1:
-        return goals[0]
-
-    def allgoal(s):
-        g = goaleval(reify(goals[0], s))
-        return unique(
-            interleave(goaleval(reify(
-                (lallgreedy, ) + tuple(goals[1:]), ss))(ss) for ss in g(s)),
-            key=dicthash)
-
-    return allgoal
-
-
-def lallfirst(*goals):
-    """ Logical all - Run goals one at a time
-
-    >>> from kanren import membero
-    >>> x = var('x')
-    >>> g = lallfirst(membero(x, (1,2,3)), membero(x, (2,3,4)))
-    >>> tuple(g({}))
-    ({~x: 2}, {~x: 3})
-    >>> tuple(lallfirst()({}))
-    ({},)
-    """
-    if not goals:
-        return success
-    if len(goals) == 1:
-        return goals[0]
-
-    def allgoal(s):
-        for i, g in enumerate(goals):
-            try:
-                goal = goaleval(reify(g, s))
-            except EarlyGoalError:
-                continue
-            other_goals = tuple(goals[:i] + goals[i + 1:])
-            return unique(
-                interleave(
-                    goaleval(reify((lallfirst, ) + other_goals, ss))(ss)
-                    for ss in goal(s)),
-                key=dicthash)
+    def eq_goal(s):
+        s = unify(u, v, s)
+        if s is not False:
+            return iter((s,))
         else:
-            raise EarlyGoalError()
+            return iter(())
 
-    return allgoal
-
-
-def lany(*goals):
-    """ Logical any
-
-    >>> from kanren import lany, membero
-    >>> x = var('x')
-    >>> g = lany(membero(x, (1,2,3)), membero(x, (2,3,4)))
-    >>> tuple(g({}))
-    ({~x: 1}, {~x: 2}, {~x: 3}, {~x: 4})
-    """
-    if len(goals) == 1:
-        return goals[0]
-    return lanyseq(goals)
+    return eq_goal
 
 
-def earlysafe(goal):
-    """ Call goal be evaluated without raising an EarlyGoalError """
-    try:
-        goaleval(goal)
-        return True
-    except EarlyGoalError:
-        return False
+def ldisj_seq(goals):
+    """Produce a goal that returns the appended state stream from all successful goal arguments.
+
+    In other words, it behaves like logical disjunction/OR for goals.
+    """  # noqa: E501
+
+    if length_hint(goals, -1) == 0:
+        return succeed
+
+    def ldisj_seq_goal(S):
+        nonlocal goals
+
+        goals, _goals = tee(goals)
+
+        yield from interleave(g(S) for g in _goals)
+
+    return ldisj_seq_goal
 
 
-def earlyorder(*goals):
-    """ Reorder goals to avoid EarlyGoalErrors
+def bind(z, g):
+    """Apply a goal to a state stream and then combine the resulting state streams."""
+    # We could also use `chain`, but `interleave` preserves the old behavior.
+    # return chain.from_iterable(map(g, z))
+    return interleave(map(g, z))
 
-    All goals are evaluated.  Those that raise EarlyGoalErrors are placed at
-    the end in a lall
 
-    See also:
-        EarlyGoalError
-    """
-    if not goals:
-        return ()
-    groups = groupby(earlysafe, goals)
-    good = groups.get(True, [])
-    bad = groups.get(False, [])
+def lconj_seq(goals):
+    """Produce a goal that returns the appended state stream in which all goals are necessarily successful.
 
-    if not good:
-        raise EarlyGoalError()
-    elif not bad:
-        return tuple(good)
+    In other words, it behaves like logical conjunction/AND for goals.
+    """  # noqa: E501
+
+    if length_hint(goals, -1) == 0:
+        return succeed
+
+    def lconj_seq_goal(S):
+        nonlocal goals
+
+        goals, _goals = tee(goals)
+
+        g0 = next(_goals, None)
+
+        if g0 is None:
+            return
+
+        yield from reduce(bind, _goals, g0(S))
+
+    return lconj_seq_goal
+
+
+def ldisj(*goals):
+    """Form a disjunction of goals."""
+    if len(goals) == 1 and isinstance(goals[0], Generator):
+        goals = goals[0]
+
+    return ldisj_seq(goals)
+
+
+def lconj(*goals):
+    """Form a conjunction of goals."""
+    if len(goals) == 1 and isinstance(goals[0], Generator):
+        goals = goals[0]
+
+    return lconj_seq(goals)
+
+
+def conde(*goals):
+    """Form a disjunction of goal conjunctions."""
+    if len(goals) == 1 and isinstance(goals[0], Generator):
+        goals = goals[0]
+
+    return ldisj_seq(lconj_seq(g) for g in goals)
+
+
+lall = lconj
+lany = ldisj
+
+
+def ground_order_key(S, x):
+    if isvar(x):
+        return 2
+    elif isground(x, S):
+        return -1
+    elif issubclass(type(x), ConsPair):
+        return 1
     else:
-        return tuple(good) + ((lall, ) + tuple(bad), )
+        return 0
 
 
-def conde(*goalseqs):
-    """ Logical cond
+def ground_order(in_args, out_args):
+    """Construct a non-relational goal that orders a list of terms based on groundedness (grounded precede ungrounded)."""  # noqa: E501
 
-    Goal constructor to provides logical AND and OR
+    def ground_order_goal(S):
+        nonlocal in_args, out_args
 
-    conde((A, B, C), (D, E)) means (A and B and C) or (D and E)
-    Equivalent to the (A, B, C); (D, E) syntax in Prolog.
+        in_args_rf, out_args_rf = reify((in_args, out_args), S)
 
-    See Also:
-        lall - logical all
-        lany - logical any
-    """
-    return (lany, ) + tuple((lall, ) + tuple(gs) for gs in goalseqs)
+        S_new = unify(
+            list(out_args_rf) if isinstance(out_args_rf, Sequence) else out_args_rf,
+            sorted(in_args_rf, key=partial(ground_order_key, S)),
+            S,
+        )
 
+        if S_new is not False:
+            yield S_new
 
-def lanyseq(goals):
-    """ Logical any with possibly infinite number of goals
-    """
-
-    def anygoal(s):
-        anygoal.goals, local_goals = it.tee(anygoal.goals)
-
-        def f(goals):
-            for goal in goals:
-                try:
-                    yield goaleval(reify(goal, s))(s)
-                except EarlyGoalError:
-                    pass
-
-        return unique(
-            interleave(
-                f(local_goals),
-                pass_exceptions=[EarlyGoalError]),
-            key=dicthash)
-
-    anygoal.goals = goals
-
-    return anygoal
+    return ground_order_goal
 
 
-def condeseq(goalseqs):
-    """
-    Like conde but supports generic (possibly infinite) iterator of goals
-    """
-    return (lanyseq, ((lall, ) + tuple(gs) for gs in goalseqs))
+def ifa(g1, g2):
+    """Create a goal operator that returns the first stream unless it fails."""
+
+    def ifa_goal(S):
+        g1_stream = g1(S)
+        S_new = next(g1_stream, None)
+
+        if S_new is None:
+            yield from g2(S)
+        else:
+            yield S_new
+            yield from g1_stream
+
+    return ifa_goal
 
 
-def everyg(predicate, coll):
-    """
-    Asserts that predicate applies to all elements of coll.
-    """
-    return (lall, ) + tuple((predicate, x) for x in coll)
+def Zzz(gctor, *args, **kwargs):
+    """Create an inverse-η-delay for a goal."""
+
+    def Zzz_goal(S):
+        yield from gctor(*args, **kwargs)(S)
+
+    return Zzz_goal
 
 
-########################
-# User level execution #
-########################
-
-
-def run(n, x, *goals):
-    """ Run a logic program.  Obtain n solutions to satisfy goals.
-
-    n     - number of desired solutions.  See ``take``
-            0 for all
-            None for a lazy sequence
-    x     - Output variable
-    goals - a sequence of goals.  All must be true
+def run(n, x, *goals, results_filter=None):
+    """Run a logic program and obtain n solutions that satisfy the given goals.
 
     >>> from kanren import run, var, eq
     >>> x = var()
     >>> run(1, x, eq(x, 1))
     (1,)
+
+    Parameters
+    ----------
+    n: int
+        The number of desired solutions. `n=0` returns a tuple
+        with all results and `n=None` returns a lazy sequence of all results.
+    x: object
+        The form to reify and output.  Usually contains logic variables used in
+        the given goals.
+    goals: Callables
+        A sequence of goals that must be true in logical conjunction
+        (i.e. `lall`).
+    results_filter: Callable
+        A function to apply to the results stream (e.g. a `unique` filter).
     """
-    results = map(partial(reify, x), goaleval(lall(*goals))({}))
-    return take(n, unique(results, key=multihash))
+    results = map(partial(reify, x), lall(*goals)({}))
 
-###################
-# Goal Evaluation #
-###################
+    if results_filter is not None:
+        results = results_filter(results)
 
-
-class EarlyGoalError(Exception):
-    """ A Goal has been constructed prematurely
-
-    Consider the following case
-
-    >>> from kanren import run, eq, membero, var
-    >>> x, coll = var(), var()
-    >>> run(0, x, (membero, x, coll), (eq, coll, (1, 2, 3))) # doctest: +SKIP
-
-    The first goal, membero, iterates over an infinite sequence of all possible
-    collections.  This is unproductive.  Rather than proceed, membero raises an
-    EarlyGoalError, stating that this goal has been called early.
-
-    The goal constructor lall Logical-All-Early will reorder such goals to
-    the end so that the call becomes
-
-    >>> run(0, x, (eq, coll, (1, 2, 3)), (membero, x, coll)) # doctest: +SKIP
-
-    In this case coll is first unified to ``(1, 2, 3)`` then x iterates over
-    all elements of coll, 1, then 2, then 3.
-
-    See Also:
-        lall
-        earlyorder
-    """
+    if n is None:
+        return results
+    elif n == 0:
+        return tuple(results)
+    else:
+        return tuple(take(n, results))
 
 
-def find_fixed_point(f, arg):
-    """
-    Repeatedly calls f until a fixed point is reached.
+def dbgo(*args, msg=None):  # pragma: no cover
+    """Construct a goal that sets a debug trace and prints reified arguments."""
+    from pprint import pprint
 
-    This may not terminate, but should if you apply some eventually-idempotent
-    simplification operation like evalt.
-    """
-    last, cur = object(), arg
-    while last != cur:
-        last = cur
-        cur = f(cur)
-    return cur
+    def dbgo_goal(S):
+        nonlocal args
+        args = reify(args, S)
 
+        if msg is not None:
+            print(msg)
 
-def goaleval(goal):
-    """ Expand and then evaluate a goal
+        pprint(args)
 
-    Idempotent
+        import pdb
 
-    See also:
-       goalexpand
-    """
-    if callable(goal):  # goal is already a function like eq(x, 1)
-        return goal
-    if isinstance(goal, tuple):  # goal is not yet evaluated like (eq, x, 1)
-        return find_fixed_point(evalt, goal)
-    raise TypeError("Expected either function or tuple")
+        pdb.set_trace()
+        yield S
+
+    return dbgo_goal

@@ -1,15 +1,23 @@
 # flake8: noqa
-"""
-kanren is a Python library for logic and relational programming.
-"""
-from __future__ import absolute_import
+"""kanren is a Python library for logic and relational programming."""
+from unification import Var, isvar, reify, unifiable, unify, var, variables, vars
 
-from unification import (unify, reify, unifiable, var, isvar, vars, variables,
-                         Var)
-
-from .core import run, eq, conde, lall, lany
-from .goals import seteq, permuteq, goalify, membero
+from ._version import get_versions
+from .core import conde, eq, lall, lany, run
 from .facts import Relation, fact, facts, remove_fact
+from .goals import (
+    appendo,
+    conso,
+    heado,
+    itero,
+    membero,
+    nullo,
+    permuteo,
+    permuteq,
+    rembero,
+    tailo,
+)
 from .term import arguments, operator, term, unifiable_with_term
 
-__version__ = '0.2.3'
+__version__ = get_versions()["version"]
+del get_versions
